@@ -1,10 +1,10 @@
-defmodule Mix.Tasks.Tailwind.Gen.Html do
-  @shortdoc "Generates controller, Tailwind CSS styled views, and context for an HTML resource"
+defmodule Mix.Tasks.Phx.Gen.Live do
+  @shortdoc "Generates LiveView, Tailwind CSS styled templates, and context for a resource"
 
   @moduledoc """
-  Generates controller, views, and context for an HTML resource.
+  Generates LiveView, templates, and context for a resource.
 
-      mix tailwind.gen.html Accounts User users name:string age:integer
+      mix tailwind.gen.live Accounts User users name:string age:integer
 
   The first argument is the context module followed by the schema module
   and its plural name (used as the schema table name).
@@ -14,24 +14,36 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
   Therefore, if the context already exists, it will be augmented with
   functions for the given resource.
 
+  When this command is run for the first time, a `ModalComponent` and
+  `LiveHelpers` module will be created, along with the resource level
+  LiveViews and components, including an `IndexLive`, `ShowLive`, `FormComponent`
+  for the new resource.
+
   > Note: A resource may also be split
   > over distinct contexts (such as `Accounts.User` and `Payments.User`).
 
   The schema is responsible for mapping the database fields into an
-  Elixir struct.
+  Elixir struct. It is followed by an optional list of attributes,
+  with their respective names and types. See `mix phx.gen.schema`
+  for more information on attributes.
 
   Overall, this generator will add the following files to `lib/`:
 
-    * a context module in `lib/app/accounts/accounts.ex` for the accounts API
+    * a context module in `lib/app/accounts.ex` for the accounts API
     * a schema in `lib/app/accounts/user.ex`, with an `users` table
     * a view in `lib/app_web/views/user_view.ex`
-    * a controller in `lib/app_web/controllers/user_controller.ex`
-    * default CRUD templates in `lib/app_web/templates/user`
+    * a LiveView in `lib/app_web/live/user_live/show_live.ex`
+    * a LiveView in `lib/app_web/live/user_live/index_live.ex`
+    * a LiveComponent in `lib/app_web/live/user_live/form_component.ex`
+    * a LiveComponent in `lib/app_web/live/modal_component.ex`
+    * a helpers modules in `lib/app_web/live/live_helpers.ex`
+
+  ## The context app
 
   A migration file for the repository and test files for the context and
   controller features will also be generated.
 
-  The location of the web files (controllers, views, templates, etc) in an
+  The location of the web files (LiveView's, views, templates, etc) in an
   umbrella application will vary based on the `:context_app` config located
   in your applications `:generators` configuration. When set, the Phoenix
   generators will generate web files directly in your lib and test folders
@@ -45,7 +57,7 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
 
   Alternatively, the `--context-app` option may be supplied to the generator:
 
-      mix tailwind.gen.html Sales User users --context-app warehouse
+      mix tailwind.gen.live Sales User users --context-app warehouse
 
   ## Web namespace
 
@@ -53,57 +65,31 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
   You can customize the web module namespace by passing the `--web` flag with a
   module name, for example:
 
-      mix tailwind.gen.html Sales User users --web Sales
+      mix tailwind.gen.live Sales User users --web Sales
 
-  Which would generate a `lib/app_web/controllers/sales/user_controller.ex` and
-  `lib/app_web/views/sales/user_view.ex`.
+  Which would generate a LiveViews inside `lib/app_web/live/sales/user_live/` and a
+  view at `lib/app_web/views/sales/user_view.ex`.
 
-  ## Generating without a schema or context file
+  ## Customising the context, schema, tables and migrations
 
-  In some cases, you may wish to bootstrap HTML templates, controllers, and
-  controller tests, but leave internal implementation of the context or schema
-  to yourself. You can use the `--no-context` and `--no-schema` flags for
-  file generation control.
+  In some cases, you may wish to bootstrap HTML templates, LiveViews,
+  and tests, but leave internal implementation of the context or schema
+  to yourself. You can use the `--no-context` and `--no-schema` flags
+  for file generation control.
 
-  ## table
-
-  By default, the table name for the migration and schema will be
-  the plural name provided for the resource. To customize this value,
-  a `--table` option may be provided. For example:
-
-      mix tailwind.gen.html Accounts User users --table cms_users
-
-  ## binary_id
-
-  Generated migration can use `binary_id` for schema's primary key
-  and its references with option `--binary-id`.
-
-  ## Default options
-
-  This generator uses default options provided in the `:generators`
-  configuration of your application. These are the defaults:
-
-      config :your_app, :generators,
-        migration: true,
-        binary_id: false,
-        sample_binary_id: "11111111-1111-1111-1111-111111111111"
-
-  You can override those options per invocation by providing corresponding
-  switches, e.g. `--no-binary-id` to use normal ids despite the default
-  configuration or `--migration` to force generation of the migration.
-
-  Read the documentation for `tailwind.gen.schema` for more information on
-  attributes.
+  You can also change the table name or configure the migrations to
+  use binary ids for primary keys, see `mix phx.gen.schema` for more
+  information.
   """
   use Mix.Task
 
-  alias Mix.Phoenix.{Context, Schema}
+  alias Mix.Phoenix.{Context}
   alias Mix.Tasks.Phx.Gen
 
   @doc false
   def run(args) do
     if Mix.Project.umbrella?() do
-      Mix.raise("mix tailwind.gen.html can only be run inside an application directory")
+      Mix.raise "mix tailwind.gen.live can only be run inside an application directory"
     end
 
     {context, schema} = Gen.Context.build(args)
@@ -115,7 +101,8 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
     prompt_for_conflicts(context)
 
     context
-    |> copy_new_files(paths, binding)
+    |> copy_new_files(binding, paths)
+    |> maybe_inject_helpers()
     |> print_shell_instructions()
   end
 
@@ -125,67 +112,115 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
     |> Kernel.++(context_files(context))
     |> Mix.Phoenix.prompt_for_conflicts()
   end
-
   defp context_files(%Context{generate?: true} = context) do
     Gen.Context.files_to_be_generated(context)
   end
-
   defp context_files(%Context{generate?: false}) do
     []
   end
 
-  @doc false
-  def files_to_be_generated(%Context{schema: schema, context_app: context_app}) do
+  defp files_to_be_generated(%Context{schema: schema, context_app: context_app}) do
     web_prefix = Mix.Phoenix.web_path(context_app)
     test_prefix = Mix.Phoenix.web_test_path(context_app)
     web_path = to_string(schema.web_path)
+    live_subdir = "#{schema.singular}_live"
 
     [
-      {:eex, "controller.ex", Path.join([web_prefix, "controllers", web_path, "#{schema.singular}_controller.ex"])},
-      {:eex, "edit.html.eex", Path.join([web_prefix, "templates", web_path, schema.singular, "edit.html.eex"])},
-      {:eex, "form.html.eex", Path.join([web_prefix, "templates", web_path, schema.singular, "form.html.eex"])},
-      {:eex, "index.html.eex", Path.join([web_prefix, "templates", web_path, schema.singular, "index.html.eex"])},
-      {:eex, "new.html.eex", Path.join([web_prefix, "templates", web_path, schema.singular, "new.html.eex"])},
-      {:eex, "show.html.eex", Path.join([web_prefix, "templates", web_path, schema.singular, "show.html.eex"])},
-      {:eex, "view.ex", Path.join([web_prefix, "views", web_path, "#{schema.singular}_view.ex"])},
-      {:eex, "controller_test.exs",
-       Path.join([test_prefix, "controllers", web_path, "#{schema.singular}_controller_test.exs"])}
+      {:eex, "show.ex",                   Path.join([web_prefix, "live", web_path, live_subdir, "show.ex"])},
+      {:eex, "index.ex",                  Path.join([web_prefix, "live", web_path, live_subdir, "index.ex"])},
+      {:eex, "form_component.ex",         Path.join([web_prefix, "live", web_path, live_subdir, "form_component.ex"])},
+      {:eex, "form_component.html.leex",  Path.join([web_prefix, "live", web_path, live_subdir, "form_component.html.leex"])},
+      {:eex, "index.html.leex",           Path.join([web_prefix, "live", web_path, live_subdir, "index.html.leex"])},
+      {:eex, "show.html.leex",            Path.join([web_prefix, "live", web_path, live_subdir, "show.html.leex"])},
+      {:eex, "live_test.exs",             Path.join([test_prefix, "live", web_path, "#{schema.singular}_live_test.exs"])},
+      {:new_eex, "modal_component.ex",    Path.join([web_prefix, "live", "modal_component.ex"])},
+      {:new_eex, "live_helpers.ex",       Path.join([web_prefix, "live", "live_helpers.ex"])},
     ]
   end
 
-  @doc false
-  def copy_new_files(%Context{} = context, paths, binding) do
+  defp copy_new_files(%Context{} = context, binding, paths) do
     files = files_to_be_generated(context)
-    Mix.Phoenix.copy_from(paths, "priv/templates/tailwind.gen.html", binding, files)
+    Mix.Phoenix.copy_from(paths, "priv/templates/tailwind.gen.live", binding, files)
     if context.generate?, do: Gen.Context.copy_new_files(context, paths, binding)
+
     context
+  end
+
+  defp maybe_inject_helpers(%Context{context_app: ctx_app} = context) do
+    web_prefix = Mix.Phoenix.web_path(ctx_app)
+    [lib_prefix, web_dir] = Path.split(web_prefix)
+    file_path = Path.join(lib_prefix, "#{web_dir}.ex")
+    file = File.read!(file_path)
+    inject = "import #{inspect(context.web_module)}.LiveHelpers"
+
+    if String.contains?(file, inject) do
+      :ok
+    else
+      do_inject_helpers(context, file, file_path, inject)
+    end
+
+    context
+  end
+
+  defp do_inject_helpers(context, file, file_path, inject) do
+    Mix.shell().info([:green, "* injecting ", :reset, Path.relative_to_cwd(file_path)])
+
+    new_file = String.replace(file, "import Phoenix.LiveView.Helpers", "import Phoenix.LiveView.Helpers\n      #{inject}")
+    if file != new_file do
+      File.write!(file_path, new_file)
+    else
+      Mix.shell().info """
+
+      Could not find Phoenix.LiveView.Helpers imported in #{file_path}.
+
+      This typically happens because your application was not generated
+      with the --live flag:
+
+          mix phx.new my_app --live
+
+      Please make sure LiveView is installed and that #{inspect(context.web_module)}
+      defines both `live_view/0` and `live_component/0` functions,
+      and that both functions import #{inspect(context.web_module)}.LiveHelpers.
+      """
+    end
   end
 
   @doc false
   def print_shell_instructions(%Context{schema: schema, context_app: ctx_app} = context) do
+    prefix = Module.concat(context.web_module, schema.web_namespace)
+    web_path = Mix.Phoenix.web_path(ctx_app)
+
     if schema.web_namespace do
-      Mix.shell().info("""
+      Mix.shell().info """
 
-      Add the resource to your #{schema.web_namespace} :browser scope in #{Mix.Phoenix.web_path(ctx_app)}/router.ex:
+      Add the live routes to your #{schema.web_namespace} :browser scope in #{web_path}/router.ex:
 
-          scope "/#{schema.web_path}", #{inspect(Module.concat(context.web_module, schema.web_namespace))}, as: :#{
-        schema.web_path
-      } do
+          scope "/#{schema.web_path}", #{inspect prefix}, as: :#{schema.web_path} do
             pipe_through :browser
             ...
-            resources "/#{schema.plural}", #{inspect(schema.alias)}Controller
+
+      #{for line <- live_route_instructions(schema), do: "      #{line}"}
           end
-      """)
+      """
     else
-      Mix.shell().info("""
+      Mix.shell().info """
 
-      Add the resource to your browser scope in #{Mix.Phoenix.web_path(ctx_app)}/router.ex:
+      Add the live routes to your browser scope in #{Mix.Phoenix.web_path(ctx_app)}/router.ex:
 
-          resources "/#{schema.plural}", #{inspect(schema.alias)}Controller
-      """)
+      #{for line <- live_route_instructions(schema), do: "    #{line}"}
+      """
     end
-
     if context.generate?, do: Gen.Context.print_shell_instructions(context)
+  end
+
+  defp live_route_instructions(schema) do
+    [
+      ~s|live "/#{schema.plural}", #{inspect(schema.alias)}Live.Index, :index\n|,
+      ~s|live "/#{schema.plural}/new", #{inspect(schema.alias)}Live.Index, :new\n|,
+      ~s|live "/#{schema.plural}/:id/edit", #{inspect(schema.alias)}Live.Index, :edit\n\n|,
+      ~s|live "/#{schema.plural}/:id", #{inspect(schema.alias)}Live.Show, :show\n|,
+      ~s|live "/#{schema.plural}/:id/show/edit", #{inspect(schema.alias)}Live.Show, :edit|
+    ]
   end
 
   defp inputs(%Schema{} = schema) do
@@ -269,3 +304,4 @@ defmodule Mix.Tasks.Tailwind.Gen.Html do
     ~s(<%= error_tag f, #{inspect(field)} %>)
   end
 end
+
